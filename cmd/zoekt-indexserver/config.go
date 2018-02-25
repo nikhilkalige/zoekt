@@ -34,6 +34,7 @@ type configEntry struct {
 	GithubUser string
 	GitilesURL string
 	CGitURL    string
+	SshURL	   string
 	Name       string
 	Exclude    string
 }
@@ -149,6 +150,15 @@ func periodicMirror(repoDir string, cfgFile string, interval time.Duration) {
 					cmd.Args = append(cmd.Args, "-exclude", c.Exclude)
 				}
 				cmd.Args = append(cmd.Args, c.CGitURL)
+				loggedRun(cmd)
+			} else if c.SshURL != "" {
+				cmd := exec.Command("zoekt-mirror-gitiles",
+					"-type", "ssh",
+					"-dest", repoDir, "-name", c.Name)
+				if c.Exclude != "" {
+					cmd.Args = append(cmd.Args, "-exclude", c.Exclude)
+				}
+				cmd.Args = append(cmd.Args, c.SshURL)
 				loggedRun(cmd)
 			}
 		}

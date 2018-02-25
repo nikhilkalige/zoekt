@@ -51,6 +51,8 @@ func main() {
 		crawler = getGitilesRepos
 	case "cgit":
 		crawler = getCGitRepos
+	case "ssh":
+		crawler = getSshRepos
 	default:
 		log.Fatalf("unknown host type %q", hostType)
 	}
