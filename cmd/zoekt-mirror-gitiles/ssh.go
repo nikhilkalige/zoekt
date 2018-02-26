@@ -25,19 +25,17 @@ import (
 	"strings"
 )
 
-
 func getSshRepos(u *url.URL, filter func(string) bool) (map[string]*crawlTarget, error) {
 	pages := map[string]*crawlTarget{}
 
-	key := strings.TrimPrefix(u.Path, "/")
-	key = strings.TrimSuffix(key, ".git")
+	name := strings.Split(u.Path, "/")[2]
+	name = strings.TrimSuffix(name, ".git")
+
 	web_url := u.String()
-	u.Scheme = ""
-	pages[key] = &crawlTarget{
+	pages[name] = &crawlTarget{
 		webURL:     web_url,
 		webURLType: "ssh",
-		cloneURL: strings.TrimPrefix(u.String(), "//"),
+		cloneURL:   u.String(),
 	}
 	return pages, nil
 }
-

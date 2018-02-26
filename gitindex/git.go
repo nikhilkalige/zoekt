@@ -127,6 +127,11 @@ func setTemplates(repo *zoekt.Repository, u *url.URL, typ string) error {
 		repo.CommitURLTemplate = u.String() + ";a=commit;h={{.Version}}"
 		repo.LineFragmentTemplate = "l{{.LineNumber}}"
 
+	case "ssh":
+		repo.CommitURLTemplate = u.String() + "/commit/{{.Version}}"
+		repo.FileURLTemplate = u.String() + "/browse/{{.Path}}/{{.Version}}"
+		repo.LineFragmentTemplate = "{{.LineNumber}}"
+
 	default:
 		return fmt.Errorf("URL scheme type %q unknown", typ)
 	}
