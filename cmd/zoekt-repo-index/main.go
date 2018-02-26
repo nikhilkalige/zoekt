@@ -44,7 +44,7 @@ import (
 	"github.com/google/slothfs/manifest"
 	"github.com/google/zoekt"
 	"github.com/google/zoekt/build"
-	"github.com/google/zoekt/gitindex"
+	"github.com/nikhilkalige/zoekt/gitindex"
 
 	git "gopkg.in/src-d/go-git.v4"
 	"gopkg.in/src-d/go-git.v4/plumbing"

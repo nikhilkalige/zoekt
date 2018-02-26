@@ -22,7 +22,7 @@ import (
 	"strings"
 
 	"github.com/google/zoekt/build"
-	"github.com/google/zoekt/gitindex"
+	"github.com/nikhilkalige/zoekt/gitindex"
 )
 
 var _ = log.Println
