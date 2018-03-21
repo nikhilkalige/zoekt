@@ -28,7 +28,7 @@ import (
 var _ = log.Println
 
 func main() {
-	var sizeMax = flag.Int("file_limit", 128*1024, "maximum file size")
+	var sizeMax = flag.Int("file_limit", 512*1024, "maximum file size")
 	var shardLimit = flag.Int("shard_limit", 100<<20, "maximum corpus size for a shard")
 	var parallelism = flag.Int("parallelism", 4, "maximum number of parallel indexing processes.")
 	allowMissing := flag.Bool("allow_missing_branches", false, "allow missing branches.")
