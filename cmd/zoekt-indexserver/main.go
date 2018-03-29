@@ -150,7 +150,9 @@ func runIndexCommand(indexDir, repoDir, indexConfigFile, indexFlags string, cpuF
 			"-incremental",
 		}
 		if indexFlags != "" {
-			args = append(args, strings.Split(indexFlags, " ")...)
+			for _, flag := range strings.Split(indexFlags, " ") {
+			    args = append(args, "-" + flag)
+		        }
 		}
 		args = append(args, dir)
 		cmd := exec.Command("zoekt-git-index", args...)
