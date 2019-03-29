@@ -117,7 +117,7 @@ func (d *indexData) Search(ctx context.Context, q query.Q, opts *SearchOptions) 
 
 	q = query.Map(q, query.ExpandFileContent)
 
-	mt, err := d.newMatchTree(q, &res.Stats)
+	mt, err := d.newMatchTree(q)
 	if err != nil {
 		return nil, err
 	}
@@ -153,8 +153,8 @@ nextFileMatch:
 		}
 		lastDoc = int(nextDoc)
 
-		if canceled || res.Stats.MatchCount >= opts.ShardMaxMatchCount ||
-			importantMatchCount >= opts.ShardMaxImportantMatch {
+		if canceled || (res.Stats.MatchCount >= opts.ShardMaxMatchCount && opts.ShardMaxMatchCount > 0) ||
+			(opts.ShardMaxImportantMatch > 0 && importantMatchCount >= opts.ShardMaxImportantMatch) {
 			res.Stats.FilesSkipped += d.repoListEntry.Stats.Documents - lastDoc
 			break
 		}
@@ -265,7 +265,11 @@ nextFileMatch:
 		addRepo(&res, v)
 	}
 
-	mt.updateStats(&res.Stats)
+	visitMatchTree(mt, func(mt matchTree) {
+		if atom, ok := mt.(interface{ updateStats(*Stats) }); ok {
+			atom.updateStats(&res.Stats)
+		}
+	})
 	return &res, nil
 }
 
@@ -405,7 +409,7 @@ func (d *indexData) List(ctx context.Context, q query.Q) (rl *RepoList, err erro
 	c, ok := q.(*query.Const)
 
 	if !ok {
-		return nil, fmt.Errorf("List should receive Repo-only query.")
+		return nil, fmt.Errorf("List should receive Repo-only query")
 	}
 
 	l := &RepoList{}

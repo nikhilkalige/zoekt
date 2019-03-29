@@ -137,7 +137,7 @@ func (ss *shardedSearcher) Search(ctx context.Context, q query.Q, opts *zoekt.Se
 	}
 	defer ss.runlock()
 	tr.LazyPrintf("acquired lock")
-	aggregate.Wait = time.Now().Sub(start)
+	aggregate.Wait = time.Since(start)
 	start = time.Now()
 
 	// TODO - allow for canceling the query.
@@ -189,7 +189,7 @@ func (ss *shardedSearcher) Search(ctx context.Context, q query.Q, opts *zoekt.Se
 			}
 		}
 
-		if cancel != nil && aggregate.Stats.MatchCount > opts.TotalMaxMatchCount {
+		if cancel != nil && opts.TotalMaxMatchCount > 0 && aggregate.Stats.MatchCount > opts.TotalMaxMatchCount {
 			cancel()
 			cancel = nil
 		}
@@ -207,7 +207,7 @@ func (ss *shardedSearcher) Search(ctx context.Context, q query.Q, opts *zoekt.Se
 		}
 	}
 
-	aggregate.Duration = time.Now().Sub(start)
+	aggregate.Duration = time.Since(start)
 	return aggregate, nil
 }
 
@@ -285,7 +285,6 @@ func (ss *shardedSearcher) List(ctx context.Context, r query.Q) (rl *zoekt.RepoL
 	crashes := 0
 	uniq := map[string]*zoekt.RepoListEntry{}
 
-	var names []string
 	for i := 0; i < shardCount; i++ {
 		r := <-all
 		if r.err != nil {
@@ -297,17 +296,15 @@ func (ss *shardedSearcher) List(ctx context.Context, r query.Q) (rl *zoekt.RepoL
 			if !ok {
 				cp := *r
 				uniq[r.Repository.Name] = &cp
-				names = append(names, r.Repository.Name)
 			} else {
 				prev.Stats.Add(&r.Stats)
 			}
 		}
 	}
-	sort.Strings(names)
 
-	aggregate := make([]*zoekt.RepoListEntry, 0, len(names))
-	for _, k := range names {
-		aggregate = append(aggregate, uniq[k])
+	aggregate := make([]*zoekt.RepoListEntry, 0, len(uniq))
+	for _, v := range uniq {
+		aggregate = append(aggregate, v)
 	}
 	return &zoekt.RepoList{
 		Repos:   aggregate,

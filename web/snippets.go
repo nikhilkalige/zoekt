@@ -32,30 +32,35 @@ func (s *Server) formatResults(result *zoekt.SearchResult, query string, localPr
 	fragmentMap := map[string]*template.Template{}
 	if !localPrint {
 		for repo, str := range result.RepoURLs {
-			templateMap[repo] = s.getTemplate(str)
+			if str != "" {
+				templateMap[repo] = s.getTemplate(str)
+			}
 		}
 		for repo, str := range result.LineFragments {
-			fragmentMap[repo] = s.getTemplate(str)
+			if str != "" {
+				fragmentMap[repo] = s.getTemplate(str)
+			}
 		}
 	}
 	getFragment := func(repo string, linenum int) string {
-		if localPrint {
-			return "l" + strconv.Itoa(linenum)
+		tpl := fragmentMap[repo]
+
+		if tpl == nil || localPrint {
+			return "#l" + strconv.Itoa(linenum)
 		}
-		if tpl := fragmentMap[repo]; tpl != nil {
-			var buf bytes.Buffer
-			if err := tpl.Execute(&buf, map[string]string{
-				"LineNumber": strconv.Itoa(linenum),
-			}); err != nil {
-				log.Printf("fragment template: %v", err)
-				return ""
-			}
-			return buf.String()
+
+		var buf bytes.Buffer
+		if err := tpl.Execute(&buf, map[string]string{
+			"LineNumber": strconv.Itoa(linenum),
+		}); err != nil {
+			log.Printf("fragment template: %v", err)
+			return ""
 		}
-		return ""
+		return buf.String()
 	}
 	getURL := func(repo, filename string, branches []string, version string) string {
-		if localPrint {
+		tpl := templateMap[repo]
+		if localPrint || tpl == nil {
 			v := make(url.Values)
 			v.Add("r", repo)
 			v.Add("f", filename)
@@ -66,24 +71,21 @@ func (s *Server) formatResults(result *zoekt.SearchResult, query string, localPr
 			return "print?" + v.Encode()
 		}
 
-		if tpl := templateMap[repo]; tpl != nil {
-			var buf bytes.Buffer
-			b := ""
-			if len(branches) > 0 {
-				b = branches[0]
-			}
-			err := tpl.Execute(&buf, map[string]string{
-				"Branch":  b,
-				"Version": version,
-				"Path":    filename,
-			})
-			if err != nil {
-				log.Printf("url template: %v", err)
-				return ""
-			}
-			return buf.String()
+		var buf bytes.Buffer
+		b := ""
+		if len(branches) > 0 {
+			b = branches[0]
 		}
-		return ""
+		err := tpl.Execute(&buf, map[string]string{
+			"Branch":  b,
+			"Version": version,
+			"Path":    filename,
+		})
+		if err != nil {
+			log.Printf("url template: %v", err)
+			return ""
+		}
+		return buf.String()
 	}
 
 	// hash => result-id
@@ -111,10 +113,15 @@ func (s *Server) formatResults(result *zoekt.SearchResult, query string, localPr
 		}
 
 		for _, m := range f.LineMatches {
+			fragment := getFragment(f.Repository, m.LineNumber)
+			if !strings.HasPrefix(fragment, "#") && !strings.HasPrefix(fragment, ";") {
+				// TODO - remove this is backward compatibility glue.
+				fragment = "#" + fragment
+			}
 			md := Match{
 				FileName: f.FileName,
 				LineNum:  m.LineNumber,
-				URL:      fMatch.URL + "#" + getFragment(f.Repository, m.LineNumber),
+				URL:      fMatch.URL + fragment,
 			}
 
 			lastEnd := 0

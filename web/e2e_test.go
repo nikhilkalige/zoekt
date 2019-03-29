@@ -30,8 +30,6 @@ import (
 	"github.com/google/zoekt/query"
 )
 
-const jsonContentType = "application/json; charset=utf-8"
-
 // TODO(hanwen): cut & paste from ../ . Should create internal test
 // util package.
 type memSeeker struct {
@@ -69,7 +67,7 @@ func TestBasic(t *testing.T) {
 		URL:                  "repo-url",
 		CommitURLTemplate:    "{{.Version}}",
 		FileURLTemplate:      "file-url",
-		LineFragmentTemplate: "line",
+		LineFragmentTemplate: "#line",
 		Branches:             []zoekt.RepositoryBranch{{Name: "master", Version: "1234"}},
 	})
 	if err != nil {
@@ -100,18 +98,7 @@ func TestBasic(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
-	res, err := http.Get(ts.URL + "/search?q=water")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resultBytes, err := ioutil.ReadAll(res.Body)
-	res.Body.Close()
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-
 	nowStr := time.Now().Format("Jan 02, 2006 15:04")
-	result := string(resultBytes)
 	for req, needles := range map[string][]string{
 		"/": []string{"from 1 repositories"},
 		"/search?q=water": []string{
@@ -129,24 +116,124 @@ func TestBasic(t *testing.T) {
 			`value=magic`,
 		},
 	} {
-		res, err := http.Get(ts.URL + req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		resultBytes, err := ioutil.ReadAll(res.Body)
-		res.Body.Close()
-		if err != nil {
-			log.Fatal(err)
-		}
+		checkNeedles(t, ts, req, needles)
+	}
+}
 
-		result := string(resultBytes)
-		for _, want := range needles {
-			if !strings.Contains(result, want) {
-				t.Errorf("query %q: result did not have %q: %s", req, want, result)
-			}
+func TestPrint(t *testing.T) {
+	b, err := zoekt.NewIndexBuilder(&zoekt.Repository{
+		Name:                 "name",
+		URL:                  "repo-url",
+		CommitURLTemplate:    "{{.Version}}",
+		FileURLTemplate:      "file-url",
+		LineFragmentTemplate: "line",
+		Branches:             []zoekt.RepositoryBranch{{Name: "master", Version: "1234"}},
+	})
+	if err != nil {
+		t.Fatalf("NewIndexBuilder: %v", err)
+	}
+	if err := b.Add(zoekt.Document{
+		Name:     "f2",
+		Content:  []byte("to carry water in the no later bla"),
+		Branches: []string{"master"},
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	if err := b.Add(zoekt.Document{
+		Name:     "dir/f2",
+		Content:  []byte("blabla"),
+		Branches: []string{"master"},
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	s := searcherForTest(t, b)
+	srv := Server{
+		Searcher: s,
+		Top:      Top,
+		HTML:     true,
+		Print:    true,
+	}
+
+	mux, err := NewMux(&srv)
+	if err != nil {
+		t.Fatalf("NewMux: %v", err)
+	}
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	for req, needles := range map[string][]string{
+		"/print?q=bla&r=name&f=f2": []string{
+			`pre id="l1" class="inline-pre"><span class="noselect"><a href="#l1">`,
+		},
+	} {
+		checkNeedles(t, ts, req, needles)
+	}
+}
+
+func TestPrintDefault(t *testing.T) {
+	b, err := zoekt.NewIndexBuilder(&zoekt.Repository{
+		Name:     "name",
+		URL:      "repo-url",
+		Branches: []zoekt.RepositoryBranch{{Name: "master", Version: "1234"}},
+	})
+	if err != nil {
+		t.Fatalf("NewIndexBuilder: %v", err)
+	}
+	if err := b.Add(zoekt.Document{
+		Name:     "f2",
+		Content:  []byte("to carry water in the no later bla"),
+		Branches: []string{"master"},
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	s := searcherForTest(t, b)
+	srv := Server{
+		Searcher: s,
+		Top:      Top,
+		HTML:     true,
+	}
+
+	mux, err := NewMux(&srv)
+	if err != nil {
+		t.Fatalf("NewMux: %v", err)
+	}
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	for req, needles := range map[string][]string{
+		"/search?q=water": []string{
+			`href="print?`,
+		},
+	} {
+		checkNeedles(t, ts, req, needles)
+	}
+}
+
+func checkNeedles(t *testing.T, ts *httptest.Server, req string, needles []string) {
+	res, err := http.Get(ts.URL + req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultBytes, err := ioutil.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	result := string(resultBytes)
+	for _, want := range needles {
+		if !strings.Contains(result, want) {
+			t.Errorf("query %q: result did not have %q: %s", req, want, result)
 		}
 	}
 	if notWant := "crashed"; strings.Contains(result, notWant) {
+		t.Errorf("result has %q: %s", notWant, result)
+	}
+	if notWant := "bytes skipped)..."; strings.Contains(result, notWant) {
 		t.Errorf("result has %q: %s", notWant, result)
 	}
 }
@@ -291,5 +378,61 @@ func TestDupResult(t *testing.T) {
 
 	if got, want := string(resultBytes), "Duplicate result"; !strings.Contains(got, want) {
 		t.Fatalf("got %s, want substring %q", got, want)
+	}
+}
+
+func TestTruncateLine(t *testing.T) {
+	b, err := zoekt.NewIndexBuilder(&zoekt.Repository{
+		Name: "name",
+	})
+	if err != nil {
+		t.Fatalf("NewIndexBuilder: %v", err)
+	}
+
+	largePadding := bytes.Repeat([]byte{'a'}, 100*1000) // 100kb
+	if err := b.Add(zoekt.Document{
+		Name:    "file",
+		Content: append(append(largePadding, []byte("helloworld")...), largePadding...),
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	s := searcherForTest(t, b)
+	srv := Server{
+		Searcher: s,
+		Top:      Top,
+		HTML:     true,
+	}
+
+	mux, err := NewMux(&srv)
+	if err != nil {
+		t.Fatalf("NewMux: %v", err)
+	}
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	req, err := http.NewRequest("GET", ts.URL+"/search?q=helloworld", &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	res, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatalf("Do(%v): %v", req, err)
+	}
+	resultBytes, err := ioutil.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	if got, want := len(resultBytes)/1000, 10; got > want {
+		t.Fatalf("got %dkb response, want <= %dkb", got, want)
+	}
+	result := string(resultBytes)
+	if want := "aa<b>helloworld</b>aa"; !strings.Contains(result, want) {
+		t.Fatalf("got %s, want substring %q", result, want)
+	}
+	if want := "bytes skipped)..."; !strings.Contains(result, want) {
+		t.Fatalf("got %s, want substring %q", result, want)
 	}
 }

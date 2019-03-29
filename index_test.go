@@ -1197,7 +1197,7 @@ func TestMatchNewline(t *testing.T) {
 	sres := searchForTest(t, b, &query.Regexp{Regexp: re, CaseSensitive: true})
 	if len(sres.Files) != 1 {
 		t.Errorf("got %v, wanted 1 matches", sres.Files)
-	} else if l := sres.Files[0].LineMatches[0].Line; bytes.Compare(l, content) != 0 {
+	} else if l := sres.Files[0].LineMatches[0].Line; !bytes.Equal(l, content) {
 		t.Errorf("got match line %q, want %q", l, content)
 	}
 }
@@ -1306,7 +1306,6 @@ func TestUnicodeNonCoverContent(t *testing.T) {
 }
 
 const kelvinCodePoint = 8490
-const kelvinUTFSize = 3
 
 func TestUnicodeVariableLength(t *testing.T) {
 	lower := 'k'
@@ -1634,7 +1633,9 @@ func TestSymbolBoundaryStart(t *testing.T) {
 			Symbols: []DocumentSection{{0, 5}, {14, 17}},
 		},
 	)
-	q := &query.Symbol{&query.Substring{Pattern: "start"}}
+	q := &query.Symbol{
+		Atom: &query.Substring{Pattern: "start"},
+	}
 	res := searchForTest(t, b, q)
 	if len(res.Files) != 1 || len(res.Files[0].LineMatches) != 1 {
 		t.Fatalf("got %v, want 1 line in 1 file", res.Files)
@@ -1656,7 +1657,9 @@ func TestSymbolBoundaryEnd(t *testing.T) {
 			Symbols: []DocumentSection{{14, 17}},
 		},
 	)
-	q := &query.Symbol{&query.Substring{Pattern: "end"}}
+	q := &query.Symbol{
+		Atom: &query.Substring{Pattern: "end"},
+	}
 	res := searchForTest(t, b, q)
 	if len(res.Files) != 1 || len(res.Files[0].LineMatches) != 1 {
 		t.Fatalf("got %v, want 1 line in 1 file", res.Files)
@@ -1678,7 +1681,9 @@ func TestSymbolAtom(t *testing.T) {
 			Symbols: []DocumentSection{{4, 12}},
 		},
 	)
-	q := &query.Symbol{&query.Substring{Pattern: "bla"}}
+	q := &query.Symbol{
+		Atom: &query.Substring{Pattern: "bla"},
+	}
 	res := searchForTest(t, b, q)
 	if len(res.Files) != 1 || len(res.Files[0].LineMatches) != 1 {
 		t.Fatalf("got %v, want 1 line in 1 file", res.Files)
@@ -1700,7 +1705,9 @@ func TestSymbolAtomExact(t *testing.T) {
 			Symbols: []DocumentSection{{4, 7}},
 		},
 	)
-	q := &query.Symbol{&query.Substring{Pattern: "sym"}}
+	q := &query.Symbol{
+		Atom: &query.Substring{Pattern: "sym"},
+	}
 	res := searchForTest(t, b, q)
 	if len(res.Files) != 1 || len(res.Files[0].LineMatches) != 1 {
 		t.Fatalf("got %v, want 1 line in 1 file", res.Files)
@@ -1788,5 +1795,50 @@ func TestUnicodeQuery(t *testing.T) {
 	fr := l.LineFragments[0]
 	if fr.MatchLength != len(content) {
 		t.Fatalf("got MatchLength %d want %d", fr.MatchLength, len(content))
+	}
+}
+
+func TestSkipInvalidContent(t *testing.T) {
+	for _, content := range []string{
+		// Binary
+		"abc def \x00 abc",
+	} {
+
+		b, err := NewIndexBuilder(nil)
+		if err != nil {
+			t.Fatalf("NewIndexBuilder: %v", err)
+		}
+
+		if err := b.Add(Document{
+			Name:    "f1",
+			Content: []byte(content),
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		q := &query.Substring{Pattern: "abc def"}
+		res := searchForTest(t, b, q)
+		if len(res.Files) != 0 {
+			t.Fatalf("got %v, want no results", res.Files)
+		}
+
+		q = &query.Substring{Pattern: "NOT-INDEXED"}
+		res = searchForTest(t, b, q)
+		if len(res.Files) != 1 {
+			t.Fatalf("got %v, want 1 result", res.Files)
+		}
+	}
+}
+
+func TestCheckText(t *testing.T) {
+	for _, text := range []string{"", "simple ascii", "símplé unicödé", "\uFEFFwith utf8 'bom'", "with \uFFFD unicode replacement char"} {
+		if err := CheckText([]byte(text)); err != nil {
+			t.Errorf("CheckText(%q): %v", text, err)
+		}
+	}
+	for _, text := range []string{"zero\x00byte", "xx"} {
+		if err := CheckText([]byte(text)); err == nil {
+			t.Errorf("CheckText(%q) succeeded", text)
+		}
 	}
 }

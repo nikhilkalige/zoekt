@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// This program manages a zoekt deployment:
+// This program manages a zoekt indexing deployment:
 // * recycling logs
 // * periodically fetching new data.
+// * periodically reindexing all git repos.
 
 package main
 
@@ -24,7 +25,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,25 +38,62 @@ import (
 
 const day = time.Hour * 24
 
-func loggedRun(cmd *exec.Cmd) {
-	out := &bytes.Buffer{}
-	errOut := &bytes.Buffer{}
-	cmd.Stdout = out
-	cmd.Stderr = errOut
+func loggedRun(cmd *exec.Cmd) (out, err []byte) {
+	outBuf := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	cmd.Stdout = outBuf
+	cmd.Stderr = errBuf
 
+	log.Printf("run %v", cmd.Args)
 	if err := cmd.Run(); err != nil {
 		log.Printf("command %s failed: %v\nOUT: %s\nERR: %s",
-			cmd.Args, err, out.String(), errOut.String())
-	} else {
-		log.Printf("ran successfully %s", cmd.Args)
+			cmd.Args, err, outBuf.String(), errBuf.String())
+	}
+
+	return outBuf.Bytes(), errBuf.Bytes()
+}
+
+type Options struct {
+	cpuFraction      float64
+	cpuCount         int
+	fetchInterval    time.Duration
+	mirrorInterval   time.Duration
+	indexFlagsStr    string
+	indexFlags       []string
+	mirrorConfigFile string
+	maxLogAge        time.Duration
+}
+
+func (o *Options) validate() {
+	if o.cpuFraction <= 0.0 || o.cpuFraction > 1.0 {
+		log.Fatal("cpu_fraction must be between 0.0 and 1.0")
+	}
+
+	o.cpuCount = int(math.Trunc(float64(runtime.NumCPU()) * o.cpuFraction))
+	if o.cpuCount < 1 {
+		o.cpuCount = 1
+	}
+	if o.indexFlagsStr != "" {
+		o.indexFlags = strings.Split(o.indexFlagsStr, " ")
 	}
 }
 
-func refresh(repoDir, indexDir, indexConfigFile, indexFlags string, fetchInterval time.Duration, cpuFraction float64) {
-	// Start with indexing something, so we can start the webserver.
-	runIndexCommand(indexDir, repoDir, indexConfigFile, indexFlags, cpuFraction)
+func (o *Options) defineFlags() {
+	flag.DurationVar(&o.maxLogAge, "max_log_age", 3*day, "recycle index logs after this much time")
+	flag.DurationVar(&o.fetchInterval, "fetch_interval", time.Hour, "run fetches this often")
+	flag.StringVar(&o.mirrorConfigFile, "mirror_config",
+		"", "JSON file holding mirror configuration.")
 
-	t := time.NewTicker(fetchInterval)
+	flag.DurationVar(&o.mirrorInterval, "mirror_duration", 24*time.Hour, "find and clone new repos at this frequency.")
+	flag.Float64Var(&o.cpuFraction, "cpu_fraction", 0.25,
+		"use this fraction of the cores for indexing.")
+	flag.StringVar(&o.indexFlagsStr, "git_index_flags", "", "space separated list of flags passed through to zoekt-git-index (e.g. -git_index_flags='-symbols=false -submodules=false'")
+}
+
+// periodicFetch runs git-fetch every once in a while. Results are
+// posted on pendingRepos.
+func periodicFetch(repoDir, indexDir string, opts *Options, pendingRepos chan<- string) {
+	t := time.NewTicker(opts.fetchInterval)
 	for {
 		repos, err := gitindex.FindGitRepos(repoDir)
 		if err != nil {
@@ -66,94 +103,63 @@ func refresh(repoDir, indexDir, indexConfigFile, indexFlags string, fetchInterva
 		if len(repos) == 0 {
 			log.Printf("no repos found under %s", repoDir)
 		}
+
+		// TODO: Randomize to make sure quota throttling hits everyone.
+
+		later := map[string]struct{}{}
 		for _, dir := range repos {
-			cmd := exec.Command("git", "--git-dir", dir, "fetch", "origin")
-			// Prevent prompting
-			cmd.Stdin = &bytes.Buffer{}
-			loggedRun(cmd)
+			if ok := fetchGitRepo(dir); !ok {
+				later[dir] = struct{}{}
+			} else {
+				pendingRepos <- dir
+			}
 		}
 
-		runIndexCommand(indexDir, repoDir, indexConfigFile, indexFlags, cpuFraction)
+		for r := range later {
+			pendingRepos <- r
+		}
+
 		<-t.C
 	}
 }
 
-func repoIndexCommand(indexDir, repoDir string, configs []RepoHostConfig) {
-	for _, cfg := range configs {
-		cmd := exec.Command("zoekt-repo-index",
-			"-parallelism=1",
-			"-repo_cache", repoDir,
-			"-index", indexDir,
-			"-base_url", cfg.BaseURL,
-			"-rev_prefix", cfg.RevPrefix,
-			"-max_sub_projects=5",
-			"-manifest_repo_url", cfg.ManifestRepoURL,
-			"-manifest_rev_prefix", cfg.ManifestRevPrefix)
+// fetchGitRepo runs git-fetch, and returns true if there was an
+// update.
+func fetchGitRepo(dir string) bool {
+	cmd := exec.Command("git", "--git-dir", dir, "fetch", "origin")
+	outBuf := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
 
-		cmd.Args = append(cmd.Args, cfg.BranchXMLs...)
-		log.Println(cmd.Args)
-		loggedRun(cmd)
-	}
-}
-
-func repositoryOnRepoHost(repoBaseDir, dir string, repoHosts []RepoHostConfig) bool {
-	for _, rh := range repoHosts {
-		u, _ := url.Parse(rh.BaseURL)
-
-		if strings.HasPrefix(dir, filepath.Join(repoBaseDir, u.Host)) {
-			return true
-		}
+	// Prevent prompting
+	cmd.Stdin = &bytes.Buffer{}
+	cmd.Stderr = errBuf
+	cmd.Stdout = outBuf
+	if err := cmd.Run(); err != nil {
+		log.Printf("command %s failed: %v\nOUT: %s\nERR: %s",
+			cmd.Args, err, outBuf.String(), errBuf.String())
+	} else {
+		return len(outBuf.Bytes()) != 0
 	}
 	return false
 }
 
-func runIndexCommand(indexDir, repoDir, indexConfigFile, indexFlags string, cpuFraction float64) {
-	var indexConfig *IndexConfig
-	if indexConfigFile != "" {
-		var err error
-		indexConfig, err = readIndexConfig(indexConfigFile)
-		if err != nil {
-			log.Printf("index config: %v", err)
-		}
-
-		repoIndexCommand(indexDir, repoDir, indexConfig.RepoHosts)
-	}
-
-	repos, err := gitindex.FindGitRepos(repoDir)
-	if err != nil {
-		log.Println("FindGitRepos", err)
-		return
-	}
-
-	cpuCount := int(math.Round(float64(runtime.NumCPU()) * cpuFraction))
-	if cpuCount < 1 {
-		cpuCount = 1
-	}
-	for _, dir := range repos {
-		if indexConfig != nil {
-			// Don't want to index the subrepos of a repo
-			// host separately.
-			if repositoryOnRepoHost(repoDir, dir, indexConfig.RepoHosts) {
-				continue
-			}
-
-			// TODO(hanwen): we should have similar
-			// functionality for avoiding to index a
-			// submodule separately too.
-		}
-
+// indexPendingRepos consumes the directories on the repos channel and
+// indexes them, sequentially.
+func indexPendingRepos(indexDir, repoDir string, opts *Options, repos <-chan string) {
+	for dir := range repos {
 		args := []string{
 			"-require_ctags",
-			fmt.Sprintf("-parallelism=%d", cpuCount),
+			fmt.Sprintf("-parallelism=%d", opts.cpuCount),
 			"-repo_cache", repoDir,
 			"-index", indexDir,
 			"-incremental",
 		}
-		if indexFlags != "" {
-			for _, flag := range strings.Split(indexFlags, " ") {
-			    args = append(args, "-" + flag)
-		        }
-		}
+		// if indexFlags != "" {
+		// 	for _, flag := range strings.Split(indexFlags, " ") {
+		// 	    args = append(args, "-" + flag)
+		//         }
+		// }
+		args = append(args, opts.indexFlags...)
 		args = append(args, dir)
 		cmd := exec.Command("zoekt-git-index", args...)
 		loggedRun(cmd)
@@ -162,27 +168,29 @@ func runIndexCommand(indexDir, repoDir, indexConfigFile, indexFlags string, cpuF
 
 // deleteLogs deletes old logs.
 func deleteLogs(logDir string, maxAge time.Duration) {
+	fs, err := filepath.Glob(filepath.Join(logDir, "*"))
+	if err != nil {
+		log.Fatalf("filepath.Glob(%s): %v", logDir, err)
+	}
+
+	threshold := time.Now().Add(-maxAge)
+	for _, fn := range fs {
+		if fi, err := os.Lstat(fn); err == nil && fi.ModTime().Before(threshold) {
+			os.Remove(fn)
+		}
+	}
+}
+
+func deleteLogsLoop(logDir string, maxAge time.Duration) {
 	tick := time.NewTicker(maxAge / 100)
 	for {
-		fs, err := filepath.Glob(filepath.Join(logDir, "*"))
-		if err != nil {
-			log.Fatalf("filepath.Glob(%s): %v", logDir, err)
-		}
-
-		threshold := time.Now().Add(-maxAge)
-		for _, fn := range fs {
-
-			if fi, err := os.Lstat(fn); err == nil && fi.ModTime().Before(threshold) {
-
-				os.Remove(fn)
-			}
-		}
+		deleteLogs(logDir, maxAge)
 		<-tick.C
 	}
 }
 
 // Delete the shard if its corresponding git repo can't be found.
-func deleteIfStale(repoDir string, fn string) error {
+func deleteIfOrphan(repoDir string, fn string) error {
 	f, err := os.Open(fn)
 	if err != nil {
 		return nil
@@ -200,20 +208,16 @@ func deleteIfStale(repoDir string, fn string) error {
 		return nil
 	}
 
-	u, err := url.Parse(repo.URL)
-	if err != nil {
-		return err
-	}
-
-	_, err = os.Stat(gitindex.Path(repoDir, u))
+	_, err = os.Stat(repo.Source)
 	if os.IsNotExist(err) {
+		log.Printf("deleting orphan shard %s; source %q not found", fn, repo.Source)
 		return os.Remove(fn)
 	}
 
 	return err
 }
 
-func deleteStaleIndexes(indexDir, repoDir string, watchInterval time.Duration) {
+func deleteOrphanIndexes(indexDir, repoDir string, watchInterval time.Duration) {
 	t := time.NewTicker(watchInterval)
 
 	expr := indexDir + "/*"
@@ -224,8 +228,8 @@ func deleteStaleIndexes(indexDir, repoDir string, watchInterval time.Duration) {
 		}
 
 		for _, f := range fs {
-			if err := deleteIfStale(repoDir, f); err != nil {
-				log.Printf("deleteIfStale(%q): %v", f, err)
+			if err := deleteIfOrphan(repoDir, f); err != nil {
+				log.Printf("deleteIfOrphan(%q): %v", f, err)
 			}
 		}
 		<-t.C
@@ -233,23 +237,14 @@ func deleteStaleIndexes(indexDir, repoDir string, watchInterval time.Duration) {
 }
 
 func main() {
-	maxLogAge := flag.Duration("max_log_age", 3*day, "recycle logs after this much time")
-	fetchInterval := flag.Duration("fetch_interval", time.Hour, "run fetches this often")
+	var opts Options
+	opts.defineFlags()
 	dataDir := flag.String("data_dir",
 		filepath.Join(os.Getenv("HOME"), "zoekt-serving"), "directory holding all data.")
-	mirrorConfig := flag.String("mirror_config",
-		"", "JSON file holding mirror configuration.")
-	indexConfig := flag.String("index_config",
-		"", "JSON file holding index configuration.")
-	mirrorInterval := flag.Duration("mirror_duration", 24*time.Hour, "clone new repos at this frequency.")
-	cpuFraction := flag.Float64("cpu_fraction", 0.25,
-		"use this fractoin of the cores for indexing.")
-	indexFlags := flag.String("git_index_flags", "", "flags passed through to zoekt-git-index (e.g. -git_index_flags='-symbols=false'")
+	indexDir := flag.String("index_dir", "", "directory holding index shards. Defaults to $data_dir/index/")
 	flag.Parse()
+	opts.validate()
 
-	if *cpuFraction <= 0.0 || *cpuFraction > 1.0 {
-		log.Fatal("cpu_fraction must be between 0.0 and 1.0")
-	}
 	if *dataDir == "" {
 		log.Fatal("must set --data_dir")
 	}
@@ -261,9 +256,11 @@ func main() {
 	}
 
 	logDir := filepath.Join(*dataDir, "logs")
-	indexDir := filepath.Join(*dataDir, "index")
+	if *indexDir == "" {
+		*indexDir = filepath.Join(*dataDir, "index")
+	}
 	repoDir := filepath.Join(*dataDir, "repos")
-	for _, s := range []string{logDir, indexDir, repoDir} {
+	for _, s := range []string{logDir, *indexDir, repoDir} {
 		if _, err := os.Stat(s); err == nil {
 			continue
 		}
@@ -273,14 +270,15 @@ func main() {
 		}
 	}
 
-	_, err := readConfig(*mirrorConfig)
+	_, err := readConfigURL(opts.mirrorConfigFile)
 	if err != nil {
-		log.Fatalf("readConfig(%s): %v", *mirrorConfig, err)
-	} else {
-		go periodicMirror(repoDir, *mirrorConfig, *mirrorInterval)
+		log.Fatalf("readConfigURL(%s): %v", opts.mirrorConfigFile, err)
 	}
-	go deleteLogs(logDir, *maxLogAge)
-	go deleteStaleIndexes(indexDir, repoDir, *fetchInterval)
 
-	refresh(repoDir, indexDir, *indexConfig, *indexFlags, *fetchInterval, *cpuFraction)
+	pendingRepos := make(chan string, 10)
+	go periodicMirrorFile(repoDir, &opts, pendingRepos)
+	go deleteLogsLoop(logDir, opts.maxLogAge)
+	go deleteOrphanIndexes(*indexDir, repoDir, opts.fetchInterval)
+	go indexPendingRepos(*indexDir, repoDir, &opts, pendingRepos)
+	periodicFetch(repoDir, *indexDir, &opts, pendingRepos)
 }

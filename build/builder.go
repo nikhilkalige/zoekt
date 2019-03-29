@@ -75,7 +75,9 @@ type Options struct {
 	MemProfile string
 }
 
-// Builder manages (parallel) creation of uniformly sized shards.
+// Builder manages (parallel) creation of uniformly sized shards. The
+// builder buffers up documents until it collects enough documents and
+// then builds a shard and writes.
 type Builder struct {
 	opts     Options
 	throttle chan int
@@ -140,22 +142,20 @@ func hashString(s string) string {
 }
 
 // ShardName returns the name the given index shard.
-func (o *Options) shardName(n int) (string, error) {
+func (o *Options) shardName(n int) string {
 	abs := url.QueryEscape(o.RepositoryDescription.Name)
 	if len(abs) > 200 {
 		abs = abs[:200] + hashString(abs)[:8]
 	}
 	return filepath.Join(o.IndexDir,
-		fmt.Sprintf("%s_v%d.%05d.zoekt", abs, zoekt.IndexFormatVersion, n)), nil
+		fmt.Sprintf("%s_v%d.%05d.zoekt", abs, zoekt.IndexFormatVersion, n))
 }
 
 // IndexVersions returns the versions as present in the index, for
 // implementing incremental indexing.
 func (o *Options) IndexVersions() []zoekt.RepositoryBranch {
-	fn, err := o.shardName(0)
-	if err != nil {
-		return nil
-	}
+	fn := o.shardName(0)
+
 	f, err := os.Open(fn)
 	if err != nil {
 		return nil
@@ -193,7 +193,7 @@ func NewBuilder(opts Options) (*Builder, error) {
 	}
 
 	if b.opts.CTags == "" && b.opts.CTagsMustSucceed {
-		return nil, fmt.Errorf("ctags binary not found, but CTagsMustSucceed set.")
+		return nil, fmt.Errorf("ctags binary not found, but CTagsMustSucceed set")
 	}
 
 	if strings.Contains(opts.CTags, "universal-ctags") {
@@ -211,17 +211,21 @@ func NewBuilder(opts Options) (*Builder, error) {
 	return b, nil
 }
 
+// AddFile is a convenience wrapper for the Add method
 func (b *Builder) AddFile(name string, content []byte) error {
 	return b.Add(zoekt.Document{Name: name, Content: content})
 }
 
 func (b *Builder) Add(doc zoekt.Document) error {
+	// We could pass the document on to the shardbuilder, but if
+	// we pass through a part of the source tree with binary/large
+	// files, the corresponding shard would be mostly empty, so
+	// insert a reason here too.
 	if len(doc.Content) > b.opts.SizeMax {
-		return nil
-	}
-
-	if !zoekt.IsText(doc.Content) {
-		return nil
+		doc.SkipReason = fmt.Sprintf("document size %d larger than limit %d", len(doc.Content), b.opts.SizeMax)
+	} else if err := zoekt.CheckText(doc.Content); err != nil {
+		doc.SkipReason = err.Error()
+		doc.Language = "binary"
 	}
 
 	b.todo = append(b.todo, &doc)
@@ -233,6 +237,8 @@ func (b *Builder) Add(doc zoekt.Document) error {
 	return nil
 }
 
+// Finish creates a last shard from the buffered documents, and clears
+// stale shards from previous runs
 func (b *Builder) Finish() error {
 	b.flush()
 	b.building.Wait()
@@ -260,11 +266,7 @@ func (b *Builder) deleteRemainingShards() {
 	for {
 		shard := b.nextShardNum
 		b.nextShardNum++
-		name, err := b.opts.shardName(shard)
-		if err != nil {
-			break
-		}
-
+		name := b.opts.shardName(shard)
 		if err := os.Remove(name); os.IsNotExist(err) {
 			break
 		}
@@ -281,7 +283,8 @@ func (b *Builder) flush() error {
 		return b.buildError
 	}
 
-	if len(todo) == 0 {
+	hasShard := b.nextShardNum > 0
+	if len(todo) == 0 && hasShard {
 		return nil
 	}
 
@@ -419,10 +422,7 @@ func (b *Builder) buildShard(todo []*zoekt.Document, nextShardNum int) (*finishe
 		}
 	}
 
-	name, err := b.opts.shardName(nextShardNum)
-	if err != nil {
-		return nil, err
-	}
+	name := b.opts.shardName(nextShardNum)
 
 	shardBuilder, err := b.newShardBuilder()
 	if err != nil {
@@ -483,4 +483,5 @@ func (b *Builder) writeShard(fn string, ib *zoekt.IndexBuilder) (*finishedShard,
 	return &finishedShard{f.Name(), fn}, nil
 }
 
+// umask holds the Umask of the current process
 var umask os.FileMode

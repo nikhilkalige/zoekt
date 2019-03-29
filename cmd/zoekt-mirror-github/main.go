@@ -30,8 +30,6 @@ import (
 	"strconv"
 	"strings"
 
-	git "gopkg.in/src-d/go-git.v4"
-
 	"github.com/google/go-github/github"
 	"golang.org/x/oauth2"
 
@@ -40,6 +38,7 @@ import (
 
 func main() {
 	dest := flag.String("dest", "", "destination directory")
+	githubURL := flag.String("url", "", "GitHub Enterprise url. If not set github.com will be used as the host.")
 	org := flag.String("org", "", "organization to mirror")
 	user := flag.String("user", "", "user to mirror")
 	token := flag.String("token",
@@ -58,12 +57,34 @@ func main() {
 		log.Fatal("must set either --org or --user")
 	}
 
-	destDir := filepath.Join(*dest, "github.com")
+	var host string
+	var apiBaseURL string
+	var client *github.Client
+	if *githubURL != "" {
+		rootURL, err := url.Parse(*githubURL)
+		if err != nil {
+			log.Fatal(err)
+		}
+		host = rootURL.Host
+		apiPath, err := url.Parse("/api/v3/")
+		if err != nil {
+			log.Fatal(err)
+		}
+		apiBaseURL = rootURL.ResolveReference(apiPath).String()
+		client, err = github.NewEnterpriseClient(apiBaseURL, apiBaseURL, nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		host = "github.com"
+		apiBaseURL = "https://github.com/"
+		client = github.NewClient(nil)
+	}
+	destDir := filepath.Join(*dest, host)
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		log.Fatal(err)
 	}
 
-	client := github.NewClient(nil)
 	if *token != "" {
 		content, err := ioutil.ReadFile(*token)
 		if err != nil {
@@ -74,8 +95,15 @@ func main() {
 			&oauth2.Token{
 				AccessToken: strings.TrimSpace(string(content)),
 			})
-		tc := oauth2.NewClient(oauth2.NoContext, ts)
-		client = github.NewClient(tc)
+		tc := oauth2.NewClient(context.Background(), ts)
+		if *githubURL != "" {
+			client, err = github.NewEnterpriseClient(apiBaseURL, apiBaseURL, tc)
+			if err != nil {
+				log.Fatal(err)
+			}
+		} else {
+			client = github.NewClient(tc)
+		}
 	}
 
 	var repos []*github.Repository
@@ -127,7 +155,13 @@ func main() {
 }
 
 func deleteStaleRepos(destDir string, filter *gitindex.Filter, repos []*github.Repository, user string) error {
-	u, err := url.Parse("https://github.com/" + user)
+	var baseURL string
+	if len(repos) > 0 {
+		baseURL = *repos[0].HTMLURL
+	} else {
+		return nil
+	}
+	u, err := url.Parse(baseURL + user)
 	if err != nil {
 		return err
 	}
@@ -181,11 +215,6 @@ func getOrgRepos(client *github.Client, org string) ([]*github.Repository, error
 		if len(repos) == 0 {
 			break
 		}
-		var names []string
-		for _, r := range repos {
-			names = append(names, *r.Name)
-		}
-		log.Println(strings.Join(names, " "))
 
 		opt.Page = resp.NextPage
 		allRepos = append(allRepos, repos...)
@@ -208,12 +237,6 @@ func getUserRepos(client *github.Client, user string) ([]*github.Repository, err
 			break
 		}
 
-		var names []string
-		for _, r := range repos {
-			names = append(names, *r.Name)
-		}
-		log.Println(strings.Join(names, " "))
-
 		opt.Page = resp.NextPage
 		allRepos = append(allRepos, repos...)
 		if resp.NextPage == 0 {
@@ -223,69 +246,37 @@ func getUserRepos(client *github.Client, user string) ([]*github.Repository, err
 	return allRepos, nil
 }
 
+func itoa(p *int) string {
+	if p != nil {
+		return strconv.Itoa(*p)
+	}
+	return ""
+}
+
 func cloneRepos(destDir string, repos []*github.Repository) error {
 	for _, r := range repos {
+		host, err := url.Parse(*r.HTMLURL)
+		if err != nil {
+			return err
+		}
 		config := map[string]string{
 			"zoekt.web-url-type": "github",
 			"zoekt.web-url":      *r.HTMLURL,
-			"zoekt.name":         filepath.Join("github.com", *r.FullName),
+			"zoekt.name":         filepath.Join(host.Hostname(), *r.FullName),
+
+			"zoekt.github-stars":       itoa(r.StargazersCount),
+			"zoekt.github-watchers":    itoa(r.WatchersCount),
+			"zoekt.github-subscribers": itoa(r.SubscribersCount),
+			"zoekt.github-forks":       itoa(r.ForksCount),
 		}
-		if err := gitindex.CloneRepo(destDir, *r.FullName, *r.CloneURL, config); err != nil {
+		dest, err := gitindex.CloneRepo(destDir, *r.FullName, *r.CloneURL, config)
+		if err != nil {
 			return err
 		}
-
-		if err := updateConfig(destDir, r); err != nil {
-			return fmt.Errorf("updateConfig: %v", err)
+		if dest != "" {
+			fmt.Println(dest)
 		}
-	}
 
-	return nil
-}
-
-func updateConfig(destDir string, r *github.Repository) error {
-	p := filepath.Join(destDir, *r.FullName+".git")
-	repo, err := git.PlainOpen(p)
-	if err != nil {
-		return fmt.Errorf("PlainOpen(%s): %v", p, err)
-	}
-
-	cfg, err := repo.Config()
-	if err != nil {
-		return err
-	}
-
-	for k, v := range map[string]*int{
-		"github-stars":       r.StargazersCount,
-		"github-watchers":    r.WatchersCount,
-		"github-subscribers": r.SubscribersCount,
-		"github-forks":       r.ForksCount,
-	} {
-		if v != nil {
-			cfg.Raw.SetOption("zoekt", "", k, strconv.Itoa(*v))
-		}
-	}
-
-	f, err := ioutil.TempFile(p, "")
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	out, err := cfg.Marshal()
-	if err != nil {
-		return err
-	}
-
-	if _, err := f.Write(out); err != nil {
-		return err
-	}
-
-	if err := f.Close(); err != nil {
-		return err
-	}
-
-	if err := os.Rename(f.Name(), filepath.Join(p, "config")); err != nil {
-		return err
 	}
 
 	return nil

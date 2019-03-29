@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package gitindex provides functions for indexing Git repositories.
 package gitindex
 
 import (
@@ -66,14 +67,22 @@ func RepoModTime(dir string) (time.Time, error) {
 	return last, nil
 }
 
-// FindGitRepos finds directories holding git repositories.
-func FindGitRepos(arg string) ([]string, error) {
-	arg, err := filepath.Abs(arg)
+// FindGitRepos finds directories holding git repositories below the
+// given directory. It will find both bare and the ".git" dirs in
+// non-bare repositories. It returns the full path including the dir
+// passed in.
+func FindGitRepos(dir string) ([]string, error) {
+	arg, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
 	}
 	var dirs []string
 	if err := filepath.Walk(arg, func(name string, fi os.FileInfo, err error) error {
+		// Best-effort, ignore filepath.Walk failing
+		if err != nil {
+			return nil
+		}
+
 		if fi, err := os.Lstat(filepath.Join(name, ".git")); err == nil && fi.IsDir() {
 			dirs = append(dirs, filepath.Join(name, ".git"))
 			return filepath.SkipDir
@@ -106,32 +115,42 @@ func setTemplates(repo *zoekt.Repository, u *url.URL, typ string) error {
 		/// eg. https://gerrit.googlesource.com/gitiles/+/master/tools/run_dev.sh#20
 		repo.CommitURLTemplate = u.String() + "/+/{{.Version}}"
 		repo.FileURLTemplate = u.String() + "/+/{{.Version}}/{{.Path}}"
-		repo.LineFragmentTemplate = "{{.LineNumber}}"
+		repo.LineFragmentTemplate = "#{{.LineNumber}}"
 	case "github":
 		// eg. https://github.com/hanwen/go-fuse/blob/notify/genversion.sh#L10
 		repo.CommitURLTemplate = u.String() + "/commit/{{.Version}}"
 		repo.FileURLTemplate = u.String() + "/blob/{{.Version}}/{{.Path}}"
-		repo.LineFragmentTemplate = "L{{.LineNumber}}"
-
+		repo.LineFragmentTemplate = "#L{{.LineNumber}}"
 	case "cgit":
-
 		// http://git.savannah.gnu.org/cgit/lilypond.git/tree/elisp/lilypond-mode.el?h=dev/philh&id=b2ca0fefe3018477aaca23b6f672c7199ba5238e#n100
-
 		repo.CommitURLTemplate = u.String() + "/commit/?id={{.Version}}"
 		repo.FileURLTemplate = u.String() + "/tree/{{.Path}}/?id={{.Version}}"
-		repo.LineFragmentTemplate = "n{{.LineNumber}}"
-
+		repo.LineFragmentTemplate = "#n{{.LineNumber}}"
 	case "gitweb":
 		// https://gerrit.libreoffice.org/gitweb?p=online.git;a=blob;f=Makefile.am;h=cfcfd7c36fbae10e269653dc57a9b68c92d4c10b;hb=848145503bf7b98ce4a4aa0a858a0d71dd0dbb26#l10
 		repo.FileURLTemplate = u.String() + ";a=blob;f={{.Path}};hb={{.Version}}"
 		repo.CommitURLTemplate = u.String() + ";a=commit;h={{.Version}}"
 		repo.LineFragmentTemplate = "l{{.LineNumber}}"
-
 	case "ssh":
 		repo.CommitURLTemplate = u.String() + "/commit/{{.Version}}"
 		repo.FileURLTemplate = u.String() + "/browse/{{.Path}}/{{.Version}}"
 		repo.LineFragmentTemplate = "{{.LineNumber}}"
-
+	case "source.bazel.build":
+		// https://source.bazel.build/bazel/+/57bc201346e61c62a921c1cbf32ad24f185c10c9
+		// https://source.bazel.build/bazel/+/57bc201346e61c62a921c1cbf32ad24f185c10c9:tools/cpp/BUILD.empty;l=10
+		repo.CommitURLTemplate = u.String() + "/+/{{.Version}}"
+		repo.FileURLTemplate = u.String() + "/+/{{.Version}}:{{.Path}}"
+		repo.LineFragmentTemplate = ";l={{.LineNumber}}"
+	case "bitbucket-server":
+		// https://<bitbucketserver-host>/projects/<project>/repos/<repo>/commits/5be7ca73b898bf17a08e607918accfdeafe1e0bc
+		// https://<bitbucketserver-host>/projects/<project>/repos/<repo>/browse/<file>?at=5be7ca73b898bf17a08e607918accfdeafe1e0bc
+		repo.CommitURLTemplate = u.String() + "/commits/{{.Version}}"
+		repo.FileURLTemplate = u.String() + "/{{.Path}}?at={{.Version}}"
+		repo.LineFragmentTemplate = "#{{.LineNumber}}"
+	case "gitlab":
+		repo.CommitURLTemplate = u.String() + "/commit/{{.Version}}"
+		repo.FileURLTemplate = u.String() + "/blob/{{.Version}}/{{.Path}}"
+		repo.LineFragmentTemplate = "#L{{.LineNumber}}"
 	default:
 		return fmt.Errorf("URL scheme type %q unknown", typ)
 	}
@@ -193,7 +212,6 @@ func setTemplatesFromConfig(desc *zoekt.Repository, repoDir string) error {
 	sec := cfg.Raw.Section("zoekt")
 
 	webURLStr := configLookupString(sec, "web-url")
-
 	webURLType := configLookupString(sec, "web-url-type")
 
 	if webURLType != "" && webURLStr != "" {
@@ -269,16 +287,32 @@ func SetTemplatesFromOrigin(desc *zoekt.Repository, u *url.URL) error {
 	}
 }
 
+// The Options structs controls details of the indexing process.
 type Options struct {
-	Submodules         bool
-	Incremental        bool
-	AllowMissingBranch bool
-	RepoCacheDir       string
-	BuildOptions       build.Options
-	RepoDir            string
+	// The repository to be indexed.
+	RepoDir string
 
+	// If set, follow submodule links. This requires RepoCacheDir to be set.
+	Submodules bool
+
+	// If set, skip indexing if the existing index shard is newer
+	// than the refs in the repository.
+	Incremental bool
+
+	// Don't error out if some branch is missing
+	AllowMissingBranch bool
+
+	// Specifies the root of a Repository cache. Needed for submodule indexing.
+	RepoCacheDir string
+
+	// Indexing options.
+	BuildOptions build.Options
+
+	// Prefix of the branch to index, e.g. `remotes/origin`.
 	BranchPrefix string
-	Branches     []string
+
+	// List of branch names to index, e.g. []string{"HEAD", "stable"}
+	Branches []string
 }
 
 func expandBranches(repo *git.Repository, bs []string, prefix string) ([]string, error) {
@@ -335,9 +369,10 @@ func IndexGitRepo(opts Options) error {
 	if opts.RepoDir == "" {
 		return fmt.Errorf("gitindex: must set RepoDir")
 	}
+
+	opts.BuildOptions.RepositoryDescription.Source = opts.RepoDir
 	repo, err := git.PlainOpen(opts.RepoDir)
 	if err != nil {
-		log.Println("B")
 		return err
 	}
 
@@ -346,7 +381,6 @@ func IndexGitRepo(opts Options) error {
 	}
 
 	repoCache := NewRepoCache(opts.RepoCacheDir)
-	defer repoCache.Close()
 
 	// branch => (path, sha1) => repo.
 	repos := map[fileKey]BlobLocation{}
@@ -452,6 +486,14 @@ func IndexGitRepo(opts Options) error {
 			}
 
 			if blob.Size > int64(opts.BuildOptions.SizeMax) {
+				if err := builder.Add(zoekt.Document{
+					SkipReason:        fmt.Sprintf("file size %d exceeds maximum size %d", blob.Size, opts.BuildOptions.SizeMax),
+					Name:              key.FullPath(),
+					Branches:          brs,
+					SubRepositoryPath: key.SubRepoPath,
+				}); err != nil {
+					return err
+				}
 				continue
 			}
 
@@ -459,12 +501,14 @@ func IndexGitRepo(opts Options) error {
 			if err != nil {
 				return err
 			}
-			builder.Add(zoekt.Document{
+			if err := builder.Add(zoekt.Document{
 				SubRepositoryPath: key.SubRepoPath,
 				Name:              key.FullPath(),
 				Content:           contents,
 				Branches:          brs,
-			})
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	return builder.Finish()

@@ -21,7 +21,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"regexp"
+	"regexp/syntax"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,7 +57,20 @@ var Funcmap = template.FuncMap{
 		}
 
 		return fmt.Sprintf("%d%s", b, suffix)
-	}}
+	},
+	"LimitPre": func(limit int, pre string) string {
+		if len(pre) < limit {
+			return pre
+		}
+		return fmt.Sprintf("...(%d bytes skipped)...%s", len(pre)-limit, pre[len(pre)-limit:])
+	},
+	"LimitPost": func(limit int, post string) string {
+		if len(post) < limit {
+			return post
+		}
+		return fmt.Sprintf("%s...(%d bytes skipped)...", post[:limit], len(post)-limit)
+	},
+}
 
 const defaultNumResults = 50
 
@@ -146,10 +163,9 @@ func NewMux(s *Server) (*http.ServeMux, error) {
 		mux.HandleFunc("/search", s.serveSearch)
 		mux.HandleFunc("/", s.serveSearchBox)
 		mux.HandleFunc("/about", s.serveAbout)
-	}
-	if s.Print {
 		mux.HandleFunc("/print", s.servePrint)
 	}
+
 	return mux, nil
 }
 
@@ -178,7 +194,6 @@ func (s *Server) serveSearchErr(w http.ResponseWriter, r *http.Request) error {
 		return fmt.Errorf("no query found")
 	}
 
-	log.Printf("got query %q", queryStr)
 	q, err := query.Parse(queryStr)
 	if err != nil {
 		return err
@@ -281,7 +296,7 @@ const statsStaleNess = 30 * time.Second
 func (s *Server) fetchStats(ctx context.Context) (*zoekt.RepoStats, error) {
 	s.lastStatsMu.Lock()
 	stats := s.lastStats
-	if time.Now().Sub(s.lastStatsTS) > statsStaleNess {
+	if time.Since(s.lastStatsTS) > statsStaleNess {
 		stats = nil
 	}
 	s.lastStatsMu.Unlock()
@@ -323,7 +338,7 @@ func (s *Server) serveSearchBoxErr(w http.ResponseWriter, r *http.Request) error
 		},
 		Stats:   stats,
 		Version: s.Version,
-		Uptime:  time.Now().Sub(s.startTime),
+		Uptime:  time.Since(s.startTime),
 	}
 
 	d.Last.Query = r.URL.Query().Get("q")
@@ -362,7 +377,7 @@ func (s *Server) serveAboutErr(w http.ResponseWriter, r *http.Request) error {
 	d := SearchBoxInput{
 		Stats:   stats,
 		Version: s.Version,
-		Uptime:  time.Now().Sub(s.startTime),
+		Uptime:  time.Since(s.startTime),
 	}
 
 	var buf bytes.Buffer
@@ -384,6 +399,34 @@ func (s *Server) serveListReposErr(q query.Q, qStr string, w http.ResponseWriter
 	repos, err := s.Searcher.List(ctx, q)
 	if err != nil {
 		return err
+	}
+
+	qvals := r.URL.Query()
+	order := qvals.Get("order")
+	switch order {
+	case "", "name", "revname":
+		sort.Slice(repos.Repos, func(i, j int) bool {
+			return strings.Compare(repos.Repos[i].Repository.Name, repos.Repos[j].Repository.Name) < 0
+		})
+	case "size", "revsize":
+		sort.Slice(repos.Repos, func(i, j int) bool {
+			return repos.Repos[i].Stats.ContentBytes < repos.Repos[j].Stats.ContentBytes
+		})
+	case "time", "revtime":
+		sort.Slice(repos.Repos, func(i, j int) bool {
+			return repos.Repos[i].IndexMetadata.IndexTime.Before(
+				repos.Repos[j].IndexMetadata.IndexTime)
+		})
+	default:
+		return fmt.Errorf("got unknown sort key %q, allowed [rev]name, [rev]time, [rev]size", order)
+	}
+	if strings.HasPrefix(order, "rev") {
+		for i, j := 0, len(repos.Repos)-1; i < j; {
+			repos.Repos[i], repos.Repos[j] = repos.Repos[j], repos.Repos[i]
+			i++
+			j--
+
+		}
 	}
 
 	aggregate := zoekt.RepoStats{
@@ -435,10 +478,6 @@ func (s *Server) serveListReposErr(q query.Q, qStr string, w http.ResponseWriter
 }
 
 func (s *Server) servePrintErr(w http.ResponseWriter, r *http.Request) error {
-	if !s.Print {
-		return fmt.Errorf("no printing template defined.")
-	}
-
 	qvals := r.URL.Query()
 	fileStr := qvals.Get("f")
 	repoStr := qvals.Get("r")
@@ -449,8 +488,12 @@ func (s *Server) servePrintErr(w http.ResponseWriter, r *http.Request) error {
 		num = defaultNumResults
 	}
 
+	re, err := syntax.Parse("^"+regexp.QuoteMeta(fileStr)+"$", 0)
+	if err != nil {
+		return err
+	}
 	qs := []query.Q{
-		&query.Substring{Pattern: fileStr, FileName: true},
+		&query.Regexp{Regexp: re, FileName: true, CaseSensitive: true},
 		&query.Repo{Pattern: repoStr},
 	}
 
@@ -471,7 +514,11 @@ func (s *Server) servePrintErr(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	if len(result.Files) != 1 {
-		return fmt.Errorf("got %d matches, want 1", len(result.Files))
+		var ss []string
+		for _, n := range result.Files {
+			ss = append(ss, n.FileName)
+		}
+		return fmt.Errorf("ambiguous result: %v", ss)
 	}
 
 	f := result.Files[0]

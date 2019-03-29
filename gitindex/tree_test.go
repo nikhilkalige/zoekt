@@ -31,8 +31,6 @@ import (
 	"github.com/google/zoekt/build"
 	"github.com/google/zoekt/query"
 	"github.com/google/zoekt/shards"
-
-	"gopkg.in/src-d/go-git.v4/plumbing"
 )
 
 func createSubmoduleRepo(dir string) error {
@@ -88,18 +86,54 @@ EOF
 	return nil
 }
 
-func TestTreeToFiles(t *testing.T) {
+func TestFindGitRepos(t *testing.T) {
 	dir, err := ioutil.TempDir("", "")
 	if err != nil {
 		t.Fatalf("TempDir: %v", err)
 	}
 
 	if err := createSubmoduleRepo(dir); err != nil {
+		t.Error("createSubmoduleRepo", err)
+	}
+	repos, err := FindGitRepos(dir)
+	if err != nil {
+		t.Error("FindGitRepos", err)
+	}
+
+	got := map[string]bool{}
+	for _, r := range repos {
+		p, err := filepath.Rel(dir, r)
+		if err != nil {
+			t.Fatalf("Relative: %v", err)
+		}
+
+		got[p] = true
+	}
+
+	want := map[string]bool{
+		"gerrit.googlesource.com/bdir.git":     true,
+		"gerrit.googlesource.com/sub/bdir.git": true,
+		"adir/.git":                            true,
+		"bdir/.git":                            true,
+		"gerrit.googlesource.com/adir.git":     true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v want %v", got, want)
+	}
+}
+
+func TestTreeToFiles(t *testing.T) {
+	dir, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatalf("TempDir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	if err := createSubmoduleRepo(dir); err != nil {
 		t.Fatalf("TempDir: %v", err)
 	}
 
 	cache := NewRepoCache(dir)
-	defer cache.Close()
 
 	aURL, _ := url.Parse("http://gerrit.googlesource.com/adir")
 	repo, err := cache.Open(aURL)
@@ -125,12 +159,11 @@ func TestTreeToFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TreeToFiles: %v", err)
 	}
-	var bnameHash plumbing.Hash
 
-	bnameHash = versions["bname"]
+	bnameHash := versions["bname"]
 	if entry, err := tree.FindEntry("bname"); err != nil {
 		t.Fatalf("FindEntry %v", err)
-	} else if bytes.Compare(bnameHash[:], entry.Hash[:]) != 0 {
+	} else if !bytes.Equal(bnameHash[:], entry.Hash[:]) {
 		t.Fatalf("got 'bname' versions %v, want %v", bnameHash, entry.Hash)
 	}
 
@@ -151,6 +184,7 @@ func TestSubmoduleIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TempDir: %v", err)
 	}
+	defer os.RemoveAll(dir)
 
 	if err := createSubmoduleRepo(dir); err != nil {
 		t.Fatalf("createSubmoduleRepo: %v", err)
@@ -347,7 +381,7 @@ func TestSkipSubmodules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TempDir: %v", err)
 	}
-	//	defer os.RemoveAll(dir)
+	defer os.RemoveAll(dir)
 
 	if err := createSubmoduleRepo(dir); err != nil {
 		t.Fatalf("createMultibranchRepo: %v", err)
@@ -442,5 +476,4 @@ func TestUniq(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
-
 }

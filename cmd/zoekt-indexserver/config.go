@@ -15,34 +15,40 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"log"
 	"math/rand"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
 
-type configEntry struct {
-	GithubUser string
-	GitilesURL string
-	CGitURL    string
-	SshURL	   string
-	Name       string
-	Exclude    string
+type ConfigEntry struct {
+	GithubUser             string
+	GithubOrg              string
+	SshURL	   			   string
+	BitBucketServerProject string
+	GitHubURL              string
+	GitilesURL             string
+	CGitURL                string
+	BitBucketServerURL     string
+	ProjectType            string
+	Name                   string
+	Exclude                string
+	GitLabURL              string
 }
 
-func randomize(entries []configEntry) []configEntry {
+func randomize(entries []ConfigEntry) []ConfigEntry {
 	perm := rand.Perm(len(entries))
 
-	var shuffled []configEntry
+	var shuffled []ConfigEntry
 	for _, i := range perm {
 		shuffled = append(shuffled, entries[i])
 	}
@@ -50,21 +56,35 @@ func randomize(entries []configEntry) []configEntry {
 	return shuffled
 }
 
-func readConfig(filename string) ([]configEntry, error) {
-	var result []configEntry
+func isHTTP(u string) bool {
+	asURL, err := url.Parse(u)
+	return err == nil && (asURL.Scheme == "http" || asURL.Scheme == "https")
+}
 
-	if filename == "" {
-		return result, nil
+func readConfigURL(u string) ([]ConfigEntry, error) {
+	var body []byte
+	var readErr error
+
+	if isHTTP(u) {
+		rep, err := http.Get(u)
+		if err != nil {
+			return nil, err
+		}
+		defer rep.Body.Close()
+
+		body, readErr = ioutil.ReadAll(rep.Body)
+	} else {
+		body, readErr = ioutil.ReadFile(u)
 	}
 
-	content, err := ioutil.ReadFile(filename)
-	if err != nil {
+	if readErr != nil {
+		return nil, readErr
+	}
+
+	var result []ConfigEntry
+	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(content, &result); err != nil {
-		return nil, err
-	}
-
 	return result, nil
 }
 
@@ -99,111 +119,119 @@ func watchFile(path string) (<-chan struct{}, error) {
 	return out, nil
 }
 
-func periodicMirror(repoDir string, cfgFile string, interval time.Duration) {
-	t := time.NewTicker(interval)
-	watcher, err := watchFile(cfgFile)
-	if err != nil {
-		log.Printf("watchFile(%q): %v", cfgFile, err)
+func periodicMirrorFile(repoDir string, opts *Options, pendingRepos chan<- string) {
+	ticker := time.NewTicker(opts.mirrorInterval)
+
+	var watcher <-chan struct{}
+	if !isHTTP(opts.mirrorConfigFile) {
+		var err error
+		watcher, err = watchFile(opts.mirrorConfigFile)
+		if err != nil {
+			log.Printf("watchFile(%q): %v", opts.mirrorConfigFile, err)
+		}
 	}
 
-	var lastCfg []configEntry
+	var lastCfg []ConfigEntry
 	for {
-		cfg, err := readConfig(cfgFile)
+		cfg, err := readConfigURL(opts.mirrorConfigFile)
 		if err != nil {
-			log.Printf("readConfig(%s): %v", cfgFile, err)
-			continue
+			log.Printf("readConfig(%s): %v", opts.mirrorConfigFile, err)
 		} else {
 			lastCfg = cfg
 		}
 
-		// Randomize the ordering in which we query
-		// things. This is to ensure that quota limits don't
-		// always hit the last one in the list.
-		lastCfg = randomize(lastCfg)
-		for _, c := range lastCfg {
-			if c.GithubUser != "" {
-				cmd := exec.Command("zoekt-mirror-github",
-					"-dest", repoDir)
-				if c.GithubUser != "" {
-					cmd.Args = append(cmd.Args, "-user", c.GithubUser)
-				}
-				if c.Name != "" {
-					cmd.Args = append(cmd.Args, "-name", c.Name)
-				}
-				if c.Exclude != "" {
-					cmd.Args = append(cmd.Args, "-exclude", c.Exclude)
-				}
-				loggedRun(cmd)
-			} else if c.GitilesURL != "" {
-				cmd := exec.Command("zoekt-mirror-gitiles",
-					"-dest", repoDir, "-name", c.Name)
-				if c.Exclude != "" {
-					cmd.Args = append(cmd.Args, "-exclude", c.Exclude)
-				}
-				cmd.Args = append(cmd.Args, c.GitilesURL)
-				loggedRun(cmd)
-			} else if c.CGitURL != "" {
-				cmd := exec.Command("zoekt-mirror-gitiles",
-					"-type", "cgit",
-					"-dest", repoDir, "-name", c.Name)
-				if c.Exclude != "" {
-					cmd.Args = append(cmd.Args, "-exclude", c.Exclude)
-				}
-				cmd.Args = append(cmd.Args, c.CGitURL)
-				loggedRun(cmd)
-			} else if c.SshURL != "" {
-				cmd := exec.Command("zoekt-mirror-gitiles",
-					"-type", "ssh",
-					"-dest", repoDir, "-name", c.Name)
-				if c.Exclude != "" {
-					cmd.Args = append(cmd.Args, "-exclude", c.Exclude)
-				}
-				cmd.Args = append(cmd.Args, c.SshURL)
-				loggedRun(cmd)
-			}
-		}
+		executeMirror(lastCfg, repoDir, pendingRepos)
 
 		select {
 		case <-watcher:
-			log.Printf("mirror config %s changed", cfgFile)
-		case <-t.C:
+			log.Printf("mirror config %s changed", opts.mirrorConfigFile)
+		case <-ticker.C:
 		}
 	}
 }
 
-type RepoHostConfig struct {
-	BaseURL           string
-	ManifestRepoURL   string
-	ManifestRevPrefix string
-	RevPrefix         string
-	BranchXMLs        []string
-}
-
-type IndexConfig struct {
-	RepoHosts []RepoHostConfig
-}
-
-func readIndexConfig(fn string) (*IndexConfig, error) {
-	c, err := ioutil.ReadFile(fn)
-	if err != nil {
-		return nil, err
-	}
-	var cfg IndexConfig
-	if err := json.Unmarshal(c, &cfg); err != nil {
-		return nil, err
-	}
-	for _, h := range cfg.RepoHosts {
-		if _, err := url.Parse(h.BaseURL); err != nil {
-			return nil, err
-		}
-
-		for _, x := range h.BranchXMLs {
-			fields := strings.SplitN(x, ":", -1)
-			if len(fields) != 2 {
-				return nil, fmt.Errorf("%s: need 2 fields in %s", h.BaseURL, x)
+func executeMirror(cfg []ConfigEntry, repoDir string, pendingRepos chan<- string) {
+	// Randomize the ordering in which we query
+	// things. This is to ensure that quota limits don't
+	// always hit the last one in the list.
+	cfg = randomize(cfg)
+	for _, c := range cfg {
+		var cmd *exec.Cmd
+		if c.GithubUser != "" || c.GithubOrg != "" {
+			cmd = exec.Command("zoekt-mirror-github",
+				"-dest", repoDir)
+			if c.GitHubURL != "" {
+				cmd.Args = append(cmd.Args, "-url", c.GitHubURL)
 			}
+			if c.GithubUser != "" {
+				cmd.Args = append(cmd.Args, "-user", c.GithubUser)
+			} else if c.GithubOrg != "" {
+				cmd.Args = append(cmd.Args, "-org", c.GithubOrg)
+			}
+			if c.Name != "" {
+				cmd.Args = append(cmd.Args, "-name", c.Name)
+			}
+			if c.Exclude != "" {
+				cmd.Args = append(cmd.Args, "-exclude", c.Exclude)
+			}
+		} else if c.GitilesURL != "" {
+			cmd = exec.Command("zoekt-mirror-gitiles",
+				"-dest", repoDir, "-name", c.Name)
+			if c.Exclude != "" {
+				cmd.Args = append(cmd.Args, "-exclude", c.Exclude)
+			}
+			cmd.Args = append(cmd.Args, c.GitilesURL)
+		} else if c.CGitURL != "" {
+			cmd = exec.Command("zoekt-mirror-gitiles",
+				"-type", "cgit",
+				"-dest", repoDir, "-name", c.Name)
+			if c.Exclude != "" {
+				cmd.Args = append(cmd.Args, "-exclude", c.Exclude)
+			}
+			cmd.Args = append(cmd.Args, c.CGitURL)
+		} else if c.BitBucketServerURL != "" {
+			cmd = exec.Command("zoekt-mirror-bitbucket-server",
+				"-dest", repoDir, "-url", c.BitBucketServerURL)
+			if c.BitBucketServerProject != "" {
+				cmd.Args = append(cmd.Args, "-project", c.BitBucketServerProject)
+			}
+			if c.ProjectType != "" {
+				cmd.Args = append(cmd.Args, "-type", c.ProjectType)
+			}
+			if c.Name != "" {
+				cmd.Args = append(cmd.Args, "-name", c.Name)
+			}
+			if c.Exclude != "" {
+				cmd.Args = append(cmd.Args, "-exclude", c.Exclude)
+			}
+		} else if c.GitLabURL != "" {
+			cmd = exec.Command("zoekt-mirror-gitlab",
+				"-dest", repoDir, "-url", c.GitLabURL)
+			if c.Name != "" {
+				cmd.Args = append(cmd.Args, "-name", c.Name)
+			}
+			if c.Exclude != "" {
+				cmd.Args = append(cmd.Args, "-exclude", c.Exclude)
+			}
+		} else if c.SshURL != "" {
+			cmd := exec.Command("zoekt-mirror-gitiles",
+				"-type", "ssh",
+				"-dest", repoDir, "-name", c.Name)
+			if c.Exclude != "" {
+				cmd.Args = append(cmd.Args, "-exclude", c.Exclude)
+			}
+			cmd.Args = append(cmd.Args, c.SshURL)
 		}
-	}
 
-	return &cfg, nil
+		stdout, _ := loggedRun(cmd)
+
+		for _, fn := range bytes.Split(stdout, []byte{'\n'}) {
+			if len(fn) == 0 {
+				continue
+			}
+
+			pendingRepos <- string(fn)
+		}
+
+	}
 }

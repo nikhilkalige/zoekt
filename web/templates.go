@@ -46,12 +46,14 @@ var TemplateText = map[string]string{
 <style>
   #navsearchbox { width: 350px !important; }
   #maxhits { width: 100px !important; }
-  #results { padding-top: 60px; }
   .label-dup {
     border-width: 1px !important;
     border-style: solid !important;
     border-color: #aaa !important;
     color: black;
+  }
+  .noselect {
+    user-select: none;
   }
   a.label-dup:hover {
     color: black;
@@ -60,11 +62,20 @@ var TemplateText = map[string]string{
   .result {
     display: block;
     content: " ";
-    margin-top: -60px;
-    height: 60px;
     visibility: hidden;
   }
-  .inline-pre { border: unset; background-color: unset; margin: unset; padding: unset; }
+  .container-results {
+     overflow: auto;
+     max-height: calc(100% - 72px);
+  }
+  .inline-pre {
+     border: unset;
+     background-color: unset;
+     margin: unset;
+     padding: unset;
+     overflow: unset;
+  }
+  :target { background-color: #ccf; }
   table tbody tr td { border: none !important; padding: 2px !important; }
 </style>
 </head>
@@ -94,7 +105,7 @@ var TemplateText = map[string]string{
 `,
 
 	"navbar": `
-<nav class="navbar navbar-default navbar-fixed-top">
+<nav class="navbar navbar-default">
   <div class="container-fluid">
     <div class="navbar-header">
       <a class="navbar-brand" href="/">Zoekt</a>
@@ -171,9 +182,9 @@ var TemplateText = map[string]string{
       </div>
     </div>
   </div>
-  <nav class="navbar navbar-default navbar-fixed-bottom">
+  <nav class="navbar navbar-default navbar-bottom">
     <div class="container">
-      <a class="navbar-text" href="about">About</a>
+      {{template "footerBoilerplate"}}
       <p class="navbar-text navbar-right">
         Used {{HumanUnit .Stats.IndexBytes}} mem for
         {{.Stats.Documents}} documents ({{HumanUnit .Stats.ContentBytes}})
@@ -184,14 +195,14 @@ var TemplateText = map[string]string{
 </body>
 </html>
 `,
-
+	"footerBoilerplate": `<a class="navbar-text" href="about">About</a>`,
 	"results": `
 <html>
 {{template "head"}}
 <title>Results for {{.QueryStr}}</title>
 <body id="results">
   {{template "navbar" .Last}}
-  <div class="container-fluid">
+  <div class="container-fluid container-results">
     <h5>
       {{if .Stats.Crashes}}<br><b>{{.Stats.Crashes}} shards crashed</b><br>{{end}}
       {{ $fileCount := len .FileMatches }}
@@ -220,7 +231,7 @@ var TemplateText = map[string]string{
         {{range .Matches}}
         <tr>
           <td style="background-color: rgba(238, 238, 255, 0.6);">
-            <pre class="inline-pre">{{if .URL}}<a href="{{.URL}}">{{end}}<u>{{.LineNum}}</u>{{if .URL}}</a>{{end}}: {{range .Fragments}}{{.Pre}}<b>{{.Match}}</b>{{.Post}}{{end}}</pre>
+            <pre class="inline-pre"><span class="noselect">{{if .URL}}<a href="{{.URL}}">{{end}}<u>{{.LineNum}}</u>{{if .URL}}</a>{{end}}: </span>{{range .Fragments}}{{LimitPre 100 .Pre}}<b>{{.Match}}</b>{{LimitPost 100 .Post}}{{end}}</pre>
           </td>
         </tr>
         {{end}}
@@ -228,8 +239,11 @@ var TemplateText = map[string]string{
       {{end}}
     </table>
     {{end}}
-    <hr>
-    <p class="text-right">
+
+  <nav class="navbar navbar-default navbar-bottom">
+    <div class="container">
+      {{template "footerBoilerplate"}}
+      <p class="navbar-text navbar-right">
       Took {{.Stats.Duration}}{{if .Stats.Wait}}(queued: {{.Stats.Wait}}){{end}} for
       {{HumanUnit .Stats.IndexBytesLoaded}}B index data,
       {{.Stats.NgramMatches}} ngram matches,
@@ -237,7 +251,9 @@ var TemplateText = map[string]string{
       {{.Stats.FilesLoaded}} docs ({{HumanUnit .Stats.ContentBytesLoaded}}B)
       loaded{{if or .Stats.FilesSkipped .Stats.ShardsSkipped}},
       {{.Stats.FilesSkipped}} docs and {{.Stats.ShardsSkipped}} shards skipped{{else}}.{{end}}
-    </p>
+      </p>
+    </div>
+  </nav>
   </div>
   {{ template "jsdep"}}
 </body>
@@ -250,31 +266,43 @@ var TemplateText = map[string]string{
 <body id="results">
   <div class="container">
     {{template "navbar" .Last}}
+    <div><b>
+    Found {{.Stats.Repos}} repositories ({{.Stats.Documents}} files, {{HumanUnit .Stats.ContentBytes}}b content)
+    </b></div>
     <table class="table table-hover table-condensed">
-    <thead>
-      <tr>
-        <th>Found {{.Stats.Repos}} repositories ({{.Stats.Documents}} files, {{HumanUnit .Stats.ContentBytes}}b content)</th>
-        <th>Last updated</th>
-        <th>Branches</th>
-        <th>Size</th>
-      </tr>
-    </thead>
-    <tbody>
-      {{range .Repos}}
-      <tr>
-        <td>{{if .URL}}<a href="{{.URL}}">{{end}}{{.Name}}{{if .URL}}</a>{{end}}</td>
-        <td><small>{{.IndexTime.Format "Jan 02, 2006 15:04"}}</small></td>
-        <td style="vertical-align: middle;">
-          {{range .Branches}}
-          {{if .URL}}<tt><a class="label label-default small" href="{{.URL}}">{{end}}{{.Name}}{{if .URL}}</a> </tt>{{end}}&nbsp;
-          {{end}}
-        </td>
-        <td><small>{{HumanUnit .Files}} files ({{HumanUnit .Size}})</small></td>
-      </tr>
-      {{end}}
-    </tbody>
-    </ul>
+      <thead>
+	<tr>
+	  <th>Name <a href="/search?q={{.Last.Query}}&order=name">▼</a><a href="/search?q={{.Last.Query}}&order=revname">▲</a></th>
+	  <th>Last updated <a href="/search?q={{.Last.Query}}&order=revtime">▼</a><a href="/search?q={{.Last.Query}}&order=time">▲</a></th>
+	  <th>Branches</th>
+	  <th>Size <a href="/search?q={{.Last.Query}}&order=revsize">▼</a><a href="/search?q={{.Last.Query}}&order=size">▲</a></th>
+	</tr>
+      </thead>
+      <tbody>
+	{{range .Repos}}
+	<tr>
+	  <td>{{if .URL}}<a href="{{.URL}}">{{end}}{{.Name}}{{if .URL}}</a>{{end}}</td>
+	  <td><small>{{.IndexTime.Format "Jan 02, 2006 15:04"}}</small></td>
+	  <td style="vertical-align: middle;">
+	    {{range .Branches}}
+	    {{if .URL}}<tt><a class="label label-default small" href="{{.URL}}">{{end}}{{.Name}}{{if .URL}}</a> </tt>{{end}}&nbsp;
+	    {{end}}
+	  </td>
+	  <td><small>{{HumanUnit .Files}} files ({{HumanUnit .Size}})</small></td>
+	</tr>
+	{{end}}
+      </tbody>
+    </table>
   </div>
+
+  <nav class="navbar navbar-default navbar-bottom">
+    <div class="container">
+      {{template "footerBoilerplate"}}
+      <p class="navbar-text navbar-right">
+      </p>
+    </div>
+  </nav>
+
   {{ template "jsdep"}}
 </body>
 </html>
@@ -282,50 +310,67 @@ var TemplateText = map[string]string{
 
 	"print": `
 <html>
-  <head>
-    <title>{{.Repo}}:{{.Name}}</title>
-  </head>
-<body>{{template "searchbox" .Last}}
-<hr>
-<p>
-  <tt>{{.Repo}} : {{.Name}}</tt>
-</p>
-
-
-<div style="background: #eef;">
-{{ range $index, $ln := .Lines}}
-  <pre><a name="l{{Inc $index}}" href="#l{{Inc $index}}">{{Inc $index}}</a>: {{$ln}}</pre>
-{{end}}
-<pre>
-</pre>
-</div>
+  {{template "head"}}
+  <title>{{.Repo}}:{{.Name}}</title>
+<body id="results">
+  {{template "navbar" .Last}}
+  <div class="container-fluid container-results" >
+     <div class="table table-hover table-condensed" style="overflow:auto; background: #eef;">
+       {{ range $index, $ln := .Lines}}
+	 <pre id="l{{Inc $index}}" class="inline-pre"><span class="noselect"><a href="#l{{Inc $index}}">{{Inc $index}}</a>: </span>{{$ln}}</pre>
+       {{end}}
+     </div>
+  <nav class="navbar navbar-default navbar-bottom">
+    <div class="container">
+      {{template "footerBoilerplate"}}
+      <p class="navbar-text navbar-right">
+      </p>
+    </div>
+  </nav>
+  </div>
+ {{ template "jsdep"}}
 </body>
 </html>
 `,
 
 	"about": `
-<head>
+
+<html>
+  {{template "head"}}
   <title>About <em>zoekt</em></title>
-</head>
 <body>
 
-<p>
-  This is <a href="http://github.com/google/zoekt"><em>zoekt</em> (IPA: /zukt/)</a>,
-  an open-source full text search engine. It's pronounced roughly as you would
-  pronounce "zooked" in English.
-</p>
 
-<p>
-Used {{HumanUnit .Stats.IndexBytes}} memory for
-{{.Stats.Documents}} documents ({{HumanUnit .Stats.ContentBytes}})
-from {{.Stats.Repos}} repositories.
-</p>
+  <div class="jumbotron">
+    <div class="container">
+      {{template "searchbox" .Last}}
+    </div>
+  </div>
 
-<p>
+  <div class="container">
+    <p>
+      This is <a href="http://github.com/google/zoekt"><em>zoekt</em> (IPA: /zukt/)</a>,
+      an open-source full text search engine. It's pronounced roughly as you would
+      pronounce "zooked" in English.
+    </p>
+    <p>
+    {{if .Version}}<em>Zoekt</em> version {{.Version}}, uptime{{else}}Uptime{{end}} {{.Uptime}}
+    </p>
 
-{{if .Version}}<em>Zoekt</em> version {{.Version}}, uptime{{else}}Uptime{{end}} {{.Uptime}}
+    <p>
+    Used {{HumanUnit .Stats.IndexBytes}} memory for
+    {{.Stats.Documents}} documents ({{HumanUnit .Stats.ContentBytes}})
+    from {{.Stats.Repos}} repositories.
+    </p>
+  </div>
 
-</p>
+  <nav class="navbar navbar-default navbar-bottom">
+    <div class="container">
+      {{template "footerBoilerplate"}}
+      <p class="navbar-text navbar-right">
+      </p>
+    </div>
+  </nav>
 `,
 }
 

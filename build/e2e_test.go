@@ -160,7 +160,6 @@ func TestUpdate(t *testing.T) {
 		if err := os.Remove(fn); err != nil {
 			t.Fatalf("Remove(%s): %v", fn, err)
 		}
-		break
 	}
 
 	time.Sleep(100 * time.Millisecond)
@@ -370,5 +369,47 @@ func TestFileRank(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			testFileRankAspect(t, c)
 		})
+	}
+}
+
+func TestEmptyContent(t *testing.T) {
+	dir, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatalf("TempDir: %v", err)
+	}
+
+	opts := Options{
+		IndexDir: dir,
+		RepositoryDescription: zoekt.Repository{
+			Name: "repo",
+		},
+	}
+	opts.SetDefaults()
+
+	b, err := NewBuilder(opts)
+	if err != nil {
+		t.Fatalf("NewBuilder: %v", err)
+	}
+	b.Finish()
+
+	fs, _ := filepath.Glob(dir + "/*")
+	if len(fs) != 1 {
+		t.Fatalf("want a shard, got %v", fs)
+	}
+
+	ss, err := shards.NewDirectorySearcher(dir)
+	if err != nil {
+		t.Fatalf("NewDirectorySearcher(%s): %v", dir, err)
+	}
+	defer ss.Close()
+
+	ctx := context.Background()
+	result, err := ss.List(ctx, &query.Const{Value: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	if len(result.Repos) != 1 || result.Repos[0].Repository.Name != "repo" {
+		t.Errorf("got %+v, want 1 repo.", result.Repos)
 	}
 }

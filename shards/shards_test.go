@@ -28,19 +28,6 @@ import (
 	"github.com/google/zoekt/query"
 )
 
-type testLoader struct {
-	searchers []zoekt.Searcher
-}
-
-func (l *testLoader) Close() {}
-func (l *testLoader) getShards() []zoekt.Searcher {
-	return l.searchers
-}
-
-func (l *testLoader) rlock()         {}
-func (l *testLoader) runlock()       {}
-func (l *testLoader) String() string { return "test" }
-
 type crashSearcher struct{}
 
 func (s *crashSearcher) Search(ctx context.Context, q query.Q, opts *zoekt.SearchOptions) (*zoekt.SearchResult, error) {
@@ -128,12 +115,18 @@ func (s *rankSearcher) List(ctx context.Context, q query.Q) (*zoekt.RepoList, er
 func TestOrderByShard(t *testing.T) {
 	ss := newShardedSearcher(1)
 
-	n := 3 * runtime.NumCPU()
+	n := 10 * runtime.NumCPU()
 	for i := 0; i < n; i++ {
 		ss.replace(fmt.Sprintf("shard%d", i),
 			&rankSearcher{
 				rank: uint16(i),
 			})
+	}
+
+	if res, err := ss.Search(context.Background(), &query.Substring{Pattern: "bla"}, &zoekt.SearchOptions{}); err != nil {
+		t.Errorf("Search: %v", err)
+	} else if len(res.Files) != n {
+		t.Fatalf("empty options: got %d results, want %d", len(res.Files), n)
 	}
 
 	opts := zoekt.SearchOptions{
@@ -219,15 +212,15 @@ func TestUnloadIndex(t *testing.T) {
 	}
 
 	for _, f := range res.Files {
-		if bytes.Index(f.Content, []byte{forbidden}) >= 0 {
+		if bytes.Contains(f.Content, []byte{forbidden}) {
 			t.Errorf("found %d in content %q", forbidden, f.Content)
 		}
-		if bytes.Index(f.Checksum, []byte{forbidden}) >= 0 {
+		if bytes.Contains(f.Checksum, []byte{forbidden}) {
 			t.Errorf("found %d in checksum %q", forbidden, f.Checksum)
 		}
 
 		for _, l := range f.LineMatches {
-			if bytes.Index(l.Line, []byte{forbidden}) >= 0 {
+			if bytes.Contains(l.Line, []byte{forbidden}) {
 				t.Errorf("found %d in line %q", forbidden, l.Line)
 			}
 		}
