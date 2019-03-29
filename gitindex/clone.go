@@ -52,9 +52,9 @@ func CloneRepo(destDir, name, cloneURL string, settings map[string]string) (stri
 	}
 
 	cmd := exec.Command(
-		"git", "clone", "--bare", "--verbose", "--progress",
+		"git", "clone", "--bare", "--verbose", "--progress")
 		// Only fetch branch heads, and ignore note branches.
-		"--config", "remote.origin.fetch=+refs/heads/*:refs/heads/*")
+		// "--config", "remote.origin.fetch=+refs/heads/*:refs/heads/*")
 	cmd.Args = append(cmd.Args, config...)
 	cmd.Args = append(cmd.Args, cloneURL, repoDest)
 
